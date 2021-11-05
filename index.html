@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+    <title>Crowd Connected Sample Map</title>
+
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css"
+        integrity="sha512-xodZBNTC5n17Xt2atTPuE1HxjVMSvLVW9ocqUKLsCC5CXdbqCmblAshOMAS6/keqq/sMZMZ19scR4PsZChSR7A=="
+        crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"
+        integrity="sha512-XQoYMqMTK8LvdxXYG3nZ448hOEQiglfqkJs1NOQV44cWnUrBc8PkAOcXy20w0vlaXaVUearIOBhiXZ5V3ynxwA=="
+        crossorigin=""></script>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet-easybutton@2/src/easy-button.css">
+    <script src="https://cdn.jsdelivr.net/npm/leaflet-easybutton@2/src/easy-button.js"></script>
+
+    <style>
+        html,
+        body {
+            height: 100%;
+            margin: 0;
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* You can customise the marker to be however you like */
+        .cc-marker-circle {
+            width: 8px;
+            height: 8px;
+            border: solid 2px;
+            border-radius: 50%;
+            border-color: white;
+            background: #3288ff;
+        }
+    </style>
+
+</head>
+
+<body>
+    <div id='map'></div>
+
+    <script>
+        let map;
+        let surfaces;
+        let currentSurfaceID;
+        let mapLayers = {};
+
+        let blueDotLayer;
+        let blueDot;
+        let jumpToLocation = true;
+
+        initMap = function (surfacesToInit) {
+            // Sort the surfaces based on their floor number
+            surfacesToInit = surfacesToInit.sort((a, b) => a.floor - b.floor);
+
+            // Surfaces need to be global so when positions are added we can correctly plot them and change the map view
+            surfaces = surfacesToInit;
+
+            // Create the Leaflet map, note the CRS must be Simple
+            map = L.map('map', {
+                crs: L.CRS.Simple
+            });
+            
+            // Calculate the bounds and zoom for the map
+            calculateBoundsZoom();
+
+            // This is where our public tiles are hosted
+            const url = 'https://public-map-data.crowdconnected.com/{appKey}/{surfaceID}/{v}/{z}/{x}/{y}.png';
+
+            // Iterate through the surfaces and now add them to the map, this cannot be done before map and bound creation
+            for (surface of surfacesToInit) {
+                const tileLayer = L.tileLayer(url, {
+                    appKey: surface.appKey,
+                    surfaceID: surface.surfaceID,
+                    v: surface.versions,
+                    tileSize: 512,                      // We generate tiles that are 512px
+                    minZoom: 0,
+                    maxZoom: surface.zoom + 4,          // This allows for zooming beyond the native tile zoom level
+                    maxNativeZoom: surface.zoom,        // This is how many tile zoom levels have been generated
+                    bounds: calculateBounds(surface.max_x, surface.min_y, surface.zoom)
+                });
+
+                mapLayers[surface.name] = tileLayer;
+            }
+
+            // Add a layer control to do simple floor selection
+            L.control.layers(mapLayers).addTo(map);
+
+            map.on('baselayerchange', function (change) {
+                if (blueDot) {
+                    blueDot.removeFrom(blueDotLayer);
+                    blueDot = null;
+                }
+                currentSurfaceID = change.layer.options.surfaceID;
+            });
+
+            // Create a layer for holding the blue dot
+            blueDotLayer = new L.LayerGroup();
+            blueDotLayer.addTo(map);
+
+            // Add a button to disable the automatic changing of the level if you wish to just navigate the map
+            L.easyButton({
+                states: [{
+                    stateName: 'location-enabled',
+                    icon: 'fas fa-compass',
+                    onClick: function (btn) {
+                        jumpToLocation = false;
+                        btn.state('location-disabled');
+                    }
+                }, {
+                    stateName: 'location-disabled',
+                    icon: 'far fa-compass',
+                    onClick: function (btn) {
+                        jumpToLocation = true;
+                        btn.state('location-enabled');
+                    }
+                }]
+            }).addTo(map);
+        }
+
+        calculateBoundsZoom = function () {
+            // Leaflet needs the bounds for the map which is from the southWest corner to the northEast
+            // The north west corner is always 0,0, so we just need to find the most southerly point (min_y) and the most easterly point (max_x)
+            // Leaflet has it's Y axis inverted e.g. 0 to -100 so the further south you go, the more negative it becomes which is why it was called min_y and not max_y
+            // The zoom is also needed for Leaflet to correctly be able to render the tiles.
+            let max_x = Math.max(...surfaces.map((s) => s.max_x));
+            let min_y = Math.min(...surfaces.map((s) => s.min_y));
+            let maxZoom = Math.max(...surfaces.map((s) => s.zoom));
+
+            const bounds = calculateBounds(max_x, min_y, maxZoom);
+
+            // Make the map fit the bounds
+            map.fitBounds(bounds);
+        }
+
+        calculateBounds = function (max_x, min_y, zoom) {
+            // Calculate the bounds, and change the projection of the numbers based on the maxZoom
+            const southWest = map.unproject([0, Math.abs(min_y)], zoom);
+            const northEast = map.unproject([max_x, 0], zoom);
+            return L.latLngBounds(southWest, northEast);
+        }
+
+        addPositionWithSurface = function (surfaceID, timestamp, y, x) {
+            const surface = surfaces.find((s) => s.surfaceID === surfaceID);
+
+            if (surface && (jumpToLocation || currentSurfaceID === surfaceID)) {
+                // Change the surface that is currently being displayed if it is not the existing surface
+                if (currentSurfaceID !== surfaceID) {
+                    currentSurfaceID = surfaceID;
+
+                    Object.keys(mapLayers).forEach((key) => {
+                        mapLayers[key].removeFrom(map);
+                    });
+
+                    mapLayers[surface.name].addTo(map)
+                }
+
+                // The positions that come from the Library are in metres, we need to convert them the map scale
+                y = y / (surface.yScalingFactor || 1);
+                x = x / (surface.xScalingFactor || 1);
+                const latLng = new L.LatLng(y, x);
+
+                // Only create a new marker if one doesn't already exist, otherwise just update its latLng
+                if (blueDotLayer && !blueDot) {
+                    blueDot = L.marker(latLng, {
+                        icon: L.divIcon({
+                            className: 'cc-marker-container',
+                            html: '<div class="cc-marker-circle"></div>'
+                        })
+                    }).addTo(blueDotLayer);
+                } else if (blueDot) {
+                    blueDot.setLatLng(latLng);
+                }
+            }
+        }
+    </script>
+</body>
+
+</html>
